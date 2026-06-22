@@ -1,0 +1,25 @@
+"""
+物理常数和默认参数
+
+这些值作为后备默认值，config YAML 中的值优先。
+"""
+
+# 粒子直径 (像素)，用于距离归一化
+PARTICLE_DIAMETER_PX: float = 20.0
+
+# 培养皿默认参数
+PETRI_DISH_DEFAULT_CENTER_X: int = 902
+PETRI_DISH_DEFAULT_CENTER_Y: int = 1157
+PETRI_DISH_DEFAULT_RADIUS_PX: int = 450
+
+# 每个实验周期的默认帧数
+DEFAULT_FRAMES_PER_CYCLE: int = 22
+
+# 相机默认参数
+CAMERA_DEFAULT_FRAMERATE: float = 90.0
+CAMERA_DEFAULT_EXPOSURE_TIME_US: float = 10000.0
+CAMERA_DEFAULT_GAIN: float = 0.0
+
+# 电源默认参数
+POWER_SUPPLY_DEFAULT_BAUDRATE: int = 9600
+POWER_SUPPLY_DEFAULT_VOLTAGE: float = 15.0

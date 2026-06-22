@@ -1,0 +1,31 @@
+# =============================================================================
+# 阶段4: 储层计算基准测试参数
+# =============================================================================
+
+preprocessing:
+  features:                     # 使用哪些特征列（来自 features.csv）
+    - entropy
+    - system_radius
+    # - neighbor_spacing        # 可多选
+  frames_per_group: 22          # 每组多少帧（等于每周期帧数）
+  normalize: true               # 是否对特征进行标准化
+  pca:
+    enabled: true               # 是否启用 PCA 降维
+    variance_threshold: 0.95    # 保留方差的阈值
+
+benchmarks:
+  enabled:                      # 启用哪些 benchmark
+    - memory_capacity
+    # - nonlinearity            # 预留
+    # - separation_curve        # 预留
+
+  memory_capacity:
+    d_max: 40                   # 最大延迟步数
+    train_ratio: 0.8            # 训练集比例 (0 = 全量拟合)
+    regression:
+      method: "ridge"           # ridge | linear | lasso
+      alpha: 0.1                # Ridge/Lasso 正则化系数
+
+output:
+  figures_dir: "output/figures"
+  reports_dir: "output/reports"

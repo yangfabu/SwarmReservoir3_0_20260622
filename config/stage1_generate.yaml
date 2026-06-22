@@ -1,0 +1,34 @@
+# =============================================================================
+# 阶段1: 输入信号生成参数
+# =============================================================================
+
+signal:
+  strategy: "discrete_set"    # 可选: uniform_random | sinusoidal | binary_sequence | discrete_set | narma
+  n_steps: 100                  # 生成的总步数
+  decimal_places: 1             # 硬件电流精度（保留小数位数）
+
+  # uniform_random 策略参数
+  uniform_random:
+    low_limit: 1.0              # 电流下限 (A)
+    high_limit: 2.0             # 电流上限 (A)
+
+  # sinusoidal 策略参数（预留）
+  sinusoidal:
+    amplitude: 0.5
+    frequency: 0.1
+    offset: 1.5
+
+  # binary_sequence 策略参数（预留）
+  binary_sequence:
+    low: 1.0
+    high: 2.0
+    min_run_length: 3
+
+  # discrete_set 策略参数
+  discrete_set:
+    # 离散电流值集合，每一步从中等概率独立随机采样
+    allowed_values: [1.0, 1.5, 2.0, 2.5, 3.0]
+
+output:
+  current_list_file: "data/stage1_output/current_sequence.csv"
+  metadata_file: "data/stage1_output/mc_metadata_log.csv"

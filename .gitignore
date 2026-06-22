@@ -1,0 +1,36 @@
+# Data and output directories (auto-generated, should not be versioned)
+data/
+output/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Distribution
+*.egg-info/
+dist/
+build/
+
+# Logs
+*.log
+experiment.log
+
+# Jupyter
+.ipynb_checkpoints/

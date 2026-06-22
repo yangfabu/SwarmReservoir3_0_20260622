@@ -1,0 +1,64 @@
+# =============================================================================
+# 阶段3: 图像特征提取参数
+# =============================================================================
+
+input:
+  # 待处理的实验图像目录（相对于项目根目录）
+  # 留空或注释掉则自动使用 data/stage2_output/ 下最新的实验目录
+  image_dir: "data/stage2_output/MCTest_20260622"
+  # 最多处理的图像数（null = 全部）
+  max_images: null
+
+mask:
+  center_x: 902                 # 培养皿圆心 X 坐标（通过 find_center 确定）
+  center_y: 1157                # 培养皿圆心 Y 坐标
+  radius: 450                   # 培养皿半径 (像素)
+
+circle_detection:
+  binary_threshold: 130         # 二值化阈值
+  canny_weak: 135               # Canny 低阈值
+  canny_strong: 170             # Canny 高阈值
+  dp: 1.5                       # Hough 累加器分辨率
+  min_dist: 20                  # 最小圆心间距
+  param1: 80                    # Hough param1
+  param2: 16                    # Hough param2
+  min_radius: 6                 # 最小粒子半径
+  max_radius: 12                # 最大粒子半径
+
+features:
+  enabled:                      # 启用哪些特征
+    - entropy
+    - distribution
+    - system_radius
+    - neighbor_spacing
+
+  entropy:
+    method: "voronoi"           # voronoi | kdtree
+    particle_diameter: 20.0     # 粒子直径 (像素)，用于距离归一化
+    bins: [1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0, 50.0]
+    min_particles: 5            # 少于此粒子数的帧将跳过
+
+  distribution:
+    method: "voronoi"           # voronoi | kdtree
+    particle_diameter: 20.0     # 粒子直径 (像素)，用于距离归一化
+    bins: [1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0, 50.0]
+    min_particles: 5            # 少于此粒子数的帧将跳过
+
+  system_radius:
+    min_particles: 3
+
+  neighbor_spacing:
+    method: "voronoi"           # voronoi | kdtree
+    min_particles: 4
+
+velocity:
+  max_displacement: 50.0        # 相邻帧粒子最大位移 (像素)，超过此值视为误匹配
+  min_matched_pairs: 3          # 最少匹配对数，低于此值该帧速度标记为 NaN
+  fps: null                     # 回退帧率 (null = 使用帧间隔推算)
+
+output:
+  particles_csv: "data/stage3_output/particles.csv"
+  features_csv: "data/stage3_output/features.csv"
+  distribution_csv: "data/stage3_output/distribution.csv"
+  velocity_csv: "data/stage3_output/velocity.csv"
+  images_with_labels: "data/stage3_output/labeled_images/"  # 可选，调试用

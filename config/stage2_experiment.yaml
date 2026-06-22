@@ -1,0 +1,31 @@
+# =============================================================================
+# 阶段2: 硬件实验采集参数
+# =============================================================================
+
+input:
+  # 电流序列文件路径（相对于项目根目录）
+  # 通常来自阶段1的产物，也可以手动指定其他电流文件
+  current_list_file: "data/stage1_output/current_sequence.csv"
+
+experiment:
+  name: "MCTest_20260622"       # 实验名称，用于创建子目录
+  voltage: 15.0                 # 电源电压 (V)
+  cycle_count: null             # null = 使用电流序列的全部步数，也可以指定具体的步数
+  frame_interval_ms: 16.67      # 帧间隔 (60 FPS = 16.67ms)
+
+  # 每周期时序（单位：秒）
+  timing:
+    phase_a: 0.0                # t=0.0: 发送电流命令
+    phase_b: 0.5                # t=0.5: 保持电流 + 启动图像保存
+    phase_c: 0.7                # t=0.7: 发送 CURR 0.0
+    phase_d: 0.9                # t=0.9: 停止图像保存
+    phase_e: 1.0                # t=1.0: 进入下一周期
+
+camera:
+  framerate: 90.0               # 帧率 (FPS)
+  exposure_time: 10000.0        # 曝光时间 (微秒)
+  gain: 0.0                     # 增益
+  trigger_mode: "continuous"    # continuous | software_trigger
+
+output:
+  image_dir: "data/stage2_output"

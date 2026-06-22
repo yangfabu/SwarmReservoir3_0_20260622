@@ -1,0 +1,26 @@
+# =============================================================================
+# SwarmReservoir 全局配置
+# 所有阶段共享的参数：路径、硬件端口、随机种子、日志格式
+# =============================================================================
+
+project:
+  name: "SwarmReservoir"
+  random_seed: 42
+
+paths:
+  data_root: "./data"
+  output_root: "./output"
+
+hardware:
+  camera:
+    type: "Hikvision"           # 相机类型: Hikvision | Basler | ...
+    connection: "GigE"          # 连接方式: USB | GigE
+  power_supply:
+    port: "COM8"                # 信号输入的电源串口端口
+    baudrate: 9600              # 波特率
+    model: "ITECH"              # SCPI 兼容设备
+
+logging:
+  level: "DEBUG"
+  format: "[%(asctime)s.%(msecs)03d] [%(levelname)s] %(message)s"
+  datefmt: "%Y-%m-%d %H:%M:%S"
