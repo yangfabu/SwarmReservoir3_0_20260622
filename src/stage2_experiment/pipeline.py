@@ -87,14 +87,47 @@ def run_stage2(
                 return
             camera_driver = ui.camera_driver
         else:
-            # GUI 模式: 启动 PyQt5 窗口，用户在 UI 中操作相机
+            # GUI 模式: 启动 PyQt5 窗口，用户在 UI 中操作相机并启动实验
             print("=" * 80)
-            print("请在相机 UI 窗口中点击: 枚举设备 → 打开 → 开始取流")
-            print("相机就绪后，实验将自动启动。")
+            print("相机控制窗口已启动。")
+            print("操作流程: 枚举设备 → 打开 → 设置参数 → 开始取流 → 启动实验")
             print("=" * 80)
-            # GUI 模式的相机初始化通过 camera_initial UI 完成
-            logger.info("GUI 模式：等待用户在 UI 中初始化相机...")
-            # 此处由外部调用者决定如何处理 UI
+
+            ui = CameraControlWindow(Path(__file__).resolve().parent.parent.parent / "config")
+
+            # 定义实验启动回调：用户在 UI 中点击"启动实验"时触发
+            def _start_experiment_from_ui(camera_drv):
+                logger.info("用户通过 UI 启动了实验")
+                exp_name = exp_cfg.get("name", "MCTest")
+                output_dir = resolve_path(f"data/stage2_output/{exp_name}")
+
+                experiment = Experiment(
+                    camera_driver=camera_drv,
+                    power_supply=power_supply,
+                    output_dir=str(output_dir),
+                    current_list_file=str(current_list_file),
+                    timing_config=exp_cfg.get("timing"),
+                    frame_interval_ms=exp_cfg.get("frame_interval_ms", 16.67),
+                )
+
+                try:
+                    logger.info(f"实验开始: {exp_name}")
+                    experiment.start(blocking=True)
+                    logger.info("阶段2 完成")
+                except KeyboardInterrupt:
+                    logger.info("用户手动停止实验")
+                    experiment.stop()
+                except Exception as e:
+                    logger.error(f"实验异常: {e}")
+
+            ui.set_experiment_callback(_start_experiment_from_ui)
+
+            # show() 会阻塞直到用户关闭窗口
+            ui.show()
+
+            # UI 关闭后清理
+            power_supply.close()
+            logger.info("阶段2 GUI 已关闭，资源已释放")
             return
     except ImportError as e:
         logger.error(f"相机模块导入失败: {e}")

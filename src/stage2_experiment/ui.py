@@ -1,59 +1,72 @@
 """
-PyQt5 相机控制界面
+PyQt5 相机控制界面（海康 Hikvision 相机）
 
-提供相机的手动控制、实时预览和参数调整功能。
-支持 GUI 模式和自动(headless)模式的相机初始化。
+提供完整的相机手动控制、实时预览和参数调整功能。
+支持 GUI 模式和 headless（自动）模式。
+
+GUI 模式下用户操作流程:
+  枚举设备 → 打开 → 设置参数 → 开始取流 → 启动实验
 
 迁移自: Current_Input/camera_initial.py + PyUICBasicDemo.py
-所有模块级全局变量已重构为 CameraControlWindow 实例属性。
 """
 
 import sys
-import os
 import json
 import threading
 import time
 from pathlib import Path
 from typing import Optional
 
-# PyQt5 可能不在所有环境中可用
+# PyQt5
 try:
     from PyQt5.QtWidgets import (
-        QApplication, QMainWindow, QMessageBox,
+        QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+        QPushButton, QLabel, QComboBox, QDoubleSpinBox, QGroupBox,
+        QTextEdit, QMessageBox, QGridLayout, QFrame,
     )
-    from PyQt5.QtCore import QFileSystemWatcher
-
+    from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
     _HAS_PYQT5 = True
 except ImportError:
     _HAS_PYQT5 = False
 
 
+# ================================================================
+# 信号发射器（跨线程通信）
+# ================================================================
+
+class _ExperimentSignals(QObject):
+    """用于 UI 线程与实验线程通信的信号。"""
+    experiment_requested = pyqtSignal()   # 用户点击"启动实验"
+    log_message = pyqtSignal(str)          # 日志消息 → UI
+
+
+# ================================================================
+# 相机控制窗口
+# ================================================================
+
 class CameraControlWindow:
     """
-    相机控制 GUI 窗口。
-
-    封装所有相机初始化、枚举、参数设置和图像采集的 UI 逻辑。
-    不再使用模块级全局变量，所有状态都在实例属性中。
+    海康相机控制 GUI 窗口。
 
     Usage:
-        window = CameraControlWindow()
-        window.show()           # 启动 GUI
+        window = CameraControlWindow(config_dir)
+        window.show()                    # 启动 GUI（阻塞，直到窗口关闭）
         # 或
-        window.auto_open_and_grab()  # 无头模式
+        window.auto_open_and_grab()      # headless 模式
     """
 
     def __init__(self, config_dir: Optional[Path] = None):
         """
         Args:
-            config_dir: 相机配置文件目录，默认使用项目 config/ 目录。
+            config_dir: 相机配置文件目录。
         """
         if not _HAS_PYQT5:
-            raise ImportError("PyQt5 未安装，无法启动相机 UI。")
+            raise ImportError("PyQt5 未安装，无法启动相机 UI。请: pip install pyqt5")
 
         self.config_dir = config_dir or Path(__file__).resolve().parent.parent.parent / "config"
         self.config_path = self.config_dir / "camera_config.json"
 
-        # === 相机状态（替代旧代码的全局变量）===
+        # === 相机状态 ===
         self.device_list = None
         self.cam = None
         self.n_sel_cam_index = 0
@@ -62,19 +75,16 @@ class CameraControlWindow:
         self.is_grabbing = False
         self.is_trigger_mode = False
 
-        # 同步事件
+        # === 同步 ===
         self.camera_ready_event = threading.Event()
 
-        # 保存计数
-        self.save_counter = 1
+        # === 信号 ===
+        self.signals = _ExperimentSignals()
 
-        # 捕获标志
-        self.capture_flag = 0
-        self._capture_callback = None
-        self._stop_capture_event = threading.Event()
-        self._capture_thread: Optional[threading.Thread] = None
+        # === 实验回调 ===
+        self._experiment_callback = None
 
-        # === 延迟导入以避免循环依赖 ===
+        # === 延迟导入 ===
         from src.stage2_experiment.hardware.camera import CameraDriver
         from src.stage2_experiment.hardware.lib.MvCameraControl_class import (
             MvCamera, MV_CC_DEVICE_INFO_LIST,
@@ -84,18 +94,36 @@ class CameraControlWindow:
         )
         self._MvCamera = MvCamera
         self._MV_CC_DEVICE_INFO_LIST = MV_CC_DEVICE_INFO_LIST
+        self._MV_GIGE_DEVICE = MV_GIGE_DEVICE
+        self._MV_USB_DEVICE = MV_USB_DEVICE
+        self._MV_GENTL_CAMERALINK_DEVICE = MV_GENTL_CAMERALINK_DEVICE
+        self._MV_GENTL_CXP_DEVICE = MV_GENTL_CXP_DEVICE
+        self._MV_GENTL_XOF_DEVICE = MV_GENTL_XOF_DEVICE
 
-        # UI 组件（延迟初始化）
+        # === Qt 组件 ===
         self.app: Optional[QApplication] = None
         self.main_window: Optional[QMainWindow] = None
-        self.ui = None
+
+        # === UI 控件引用 ===
+        self._cmb_devices: Optional[QComboBox] = None
+        self._btn_enumerate: Optional[QPushButton] = None
+        self._btn_open: Optional[QPushButton] = None
+        self._btn_close: Optional[QPushButton] = None
+        self._btn_start_grab: Optional[QPushButton] = None
+        self._btn_stop_grab: Optional[QPushButton] = None
+        self._btn_experiment: Optional[QPushButton] = None
+        self._spn_framerate: Optional[QDoubleSpinBox] = None
+        self._spn_exposure: Optional[QDoubleSpinBox] = None
+        self._spn_gain: Optional[QDoubleSpinBox] = None
+        self._txt_log: Optional[QTextEdit] = None
+        self._lbl_status: Optional[QLabel] = None
 
     # ================================================================
-    # 配置加载/保存
+    # 配置
     # ================================================================
 
     def load_config(self) -> dict:
-        """加载相机配置 JSON 文件。"""
+        """加载相机配置文件。"""
         if self.config_path.exists():
             with open(self.config_path, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -107,141 +135,428 @@ class CameraControlWindow:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.config_path, "w") as f:
             json.dump(config, f, indent=4)
+        self._log(f"配置已保存: framerate={framerate}, exposure={exposuretime}, gain={gain}")
 
     # ================================================================
-    # 相机 SDk 初始化 & 枚举
+    # SDK
     # ================================================================
 
     def init_sdk(self) -> None:
         """初始化海康相机 SDK。"""
         self._MvCamera.MV_CC_Initialize()
+        self._log("SDK 已初始化")
 
     def finalize_sdk(self) -> None:
         """释放 SDK。"""
         self._MvCamera.MV_CC_Finalize()
+        self._log("SDK 已释放")
 
     def enumerate_devices(self) -> list:
-        """枚举连接的相机设备。返回设备描述列表。"""
+        """枚举相机设备。"""
         device_list = self._MV_CC_DEVICE_INFO_LIST()
         n_layer_type = (
-            MV_GIGE_DEVICE | MV_USB_DEVICE
-            | MV_GENTL_CAMERALINK_DEVICE | MV_GENTL_CXP_DEVICE
-            | MV_GENTL_XOF_DEVICE
+            self._MV_GIGE_DEVICE | self._MV_USB_DEVICE
+            | self._MV_GENTL_CAMERALINK_DEVICE | self._MV_GENTL_CXP_DEVICE
+            | self._MV_GENTL_XOF_DEVICE
         )
         ret = self._MvCamera.MV_CC_EnumDevices(n_layer_type, device_list)
         self.device_list = device_list
         return device_list
 
     # ================================================================
-    # 自动打开和抓取（无头模式）
+    # 相机操作
+    # ================================================================
+
+    def open_device(self, index: int = 0) -> bool:
+        """打开指定索引的相机设备。"""
+        if self.cam is None:
+            self.cam = self._MvCamera()
+        self.camera_driver = CameraDriver(self.cam, self.device_list, index)
+        ret = self.camera_driver.open_device()
+        if ret == 0:
+            self.is_open = True
+            self._log(f"设备 {index} 已打开")
+            return True
+        self._log(f"打开设备 {index} 失败 (返回码: {ret})")
+        return False
+
+    def close_device(self) -> None:
+        """关闭相机设备。"""
+        if self.is_grabbing:
+            self.stop_grabbing()
+        if self.camera_driver:
+            self.camera_driver.close_device()
+        self.is_open = False
+        self.camera_ready_event.clear()
+        self._log("设备已关闭")
+
+    def start_grabbing(self) -> bool:
+        """开始连续取流。"""
+        if not self.camera_driver or not self.is_open:
+            self._log("错误: 请先打开设备")
+            return False
+        ret = self.camera_driver.start_grabbing(0)
+        if ret == 0:
+            self.is_grabbing = True
+            self.camera_ready_event.set()
+            self._log("取流已开始")
+            return True
+        self._log(f"开始取流失败 (返回码: {ret})")
+        return False
+
+    def stop_grabbing(self) -> None:
+        """停止取流。"""
+        if self.camera_driver:
+            self.camera_driver.stop_grabbing()
+        self.is_grabbing = False
+        self.camera_ready_event.clear()
+        self._log("取流已停止")
+
+    def set_parameters(self, framerate: float, exposure: float, gain: float) -> None:
+        """设置相机参数。"""
+        if self.camera_driver:
+            self.camera_driver.set_parameter(framerate, exposure, gain)
+            self._log(f"参数已设置: FPS={framerate}, Exp={exposure}us, Gain={gain}")
+
+    # ================================================================
+    # Headless 模式
     # ================================================================
 
     def auto_open_and_grab(self) -> bool:
         """
-        自动打开第一个设备并开始连续抓取（无 GUI 模式）。
+        无 GUI 模式：自动打开第一个设备并开始取流。
 
         Returns:
             成功返回 True。
         """
-        from src.stage2_experiment.hardware.camera import CameraDriver
-
         self.init_sdk()
-        self.cam = self._MvCamera()
-
-        device_list = self._MV_CC_DEVICE_INFO_LIST()
-        n_layer_type = (
-            MV_GIGE_DEVICE | MV_USB_DEVICE
-            | MV_GENTL_CAMERALINK_DEVICE | MV_GENTL_CXP_DEVICE
-            | MV_GENTL_XOF_DEVICE
-        )
-        ret = self._MvCamera.MV_CC_EnumDevices(n_layer_type, device_list)
-        if ret != 0 or device_list.nDeviceNum == 0:
-            print("[UI] 未找到相机设备")
+        device_list = self.enumerate_devices()
+        if device_list.nDeviceNum == 0:
+            self._log("未找到相机设备")
             return False
+        self._log(f"找到 {device_list.nDeviceNum} 个设备")
 
-        self.device_list = device_list
-        self.n_sel_cam_index = 0
-
-        self.camera_driver = CameraDriver(self.cam, device_list, 0)
-        ret = self.camera_driver.open_device()
-        if ret != 0:
-            print("[UI] 打开设备失败")
+        if not self.open_device(0):
             return False
-        self.is_open = True
 
         config = self.load_config()
-        self.camera_driver.set_parameter(
-            config["framerate"], config["exposuretime"], config.get("gain", 0.0)
+        self.set_parameters(
+            config.get("framerate", 90.0),
+            config.get("exposuretime", 10000.0),
+            config.get("gain", 0.0),
         )
 
-        ret = self.camera_driver.start_grabbing(0)
-        if ret != 0:
-            print("[UI] 开始采集失败")
+        if not self.start_grabbing():
             return False
-        self.is_grabbing = True
 
-        self.camera_ready_event.set()
-        print("[UI] 相机已就绪 (无头模式)")
+        self._log("相机已就绪 (headless 模式)")
         return True
 
     def auto_close(self) -> None:
-        """自动关闭相机设备。"""
-        if self.is_grabbing and self.camera_driver:
-            self.camera_driver.stop_grabbing()
-            self.is_grabbing = False
-        if self.is_open and self.camera_driver:
-            self.camera_driver.close_device()
-            self.is_open = False
-        self.camera_ready_event.clear()
-        print("[UI] 相机已关闭")
+        """关闭相机（headless 模式清理）。"""
+        self.close_device()
 
     # ================================================================
-    # 捕获线程（用于实验自动采集）
+    # 实验回调
     # ================================================================
 
-    def set_capture_flag(self, value: int) -> None:
-        """设置捕获标志位，触发自动保存。"""
-        if value != self.capture_flag:
-            self.capture_flag = value
-            if self._capture_callback:
-                self._capture_callback(value)
+    def set_experiment_callback(self, callback) -> None:
+        """
+        设置实验启动回调。当用户点击"启动实验"时调用。
 
-    def set_capture_callback(self, callback) -> None:
-        """设置捕获标志变化回调。"""
-        self._capture_callback = callback
+        Args:
+            callback: 可调用对象，签名为 callback(camera_driver)。
+        """
+        self._experiment_callback = callback
 
-    def start_capture_thread(self, capture_interval: float) -> None:
-        """启动自动捕获线程。"""
-        if self._capture_thread and self._capture_thread.is_alive():
-            return
-        self._stop_capture_event.clear()
-        self._capture_thread = threading.Thread(
-            target=self._capture_worker, args=(capture_interval,), daemon=True
+    # ================================================================
+    # GUI 构建
+    # ================================================================
+
+    def show(self) -> None:
+        """
+        构建并显示 PyQt5 GUI 窗口。
+
+        该调用会阻塞，直到用户关闭窗口。
+        """
+        if not _HAS_PYQT5:
+            raise ImportError("PyQt5 未安装")
+
+        self.app = QApplication.instance() or QApplication(sys.argv)
+
+        # --- 主窗口 ---
+        self.main_window = QMainWindow()
+        self.main_window.setWindowTitle("海康相机控制 — SwarmReservoir Stage 2")
+        self.main_window.setMinimumSize(640, 520)
+
+        central = QWidget()
+        self.main_window.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.setSpacing(8)
+
+        # --- 状态栏 ---
+        self._lbl_status = QLabel("就绪 — 请先枚举设备")
+        self._lbl_status.setStyleSheet(
+            "QLabel { background: #333; color: #0f0; padding: 6px; "
+            "font-family: Consolas; font-size: 13px; }"
         )
-        self._capture_thread.start()
+        layout.addWidget(self._lbl_status)
 
-    def stop_capture_thread(self) -> None:
-        """停止自动捕获线程。"""
-        self._stop_capture_event.set()
-        if self._capture_thread and self._capture_thread.is_alive():
-            self._capture_thread.join(timeout=2.0)
+        # --- 设备选择 ---
+        grp_dev = QGroupBox("设备选择")
+        grp_dev_layout = QGridLayout(grp_dev)
+        self._cmb_devices = QComboBox()
+        self._cmb_devices.setMinimumWidth(350)
+        grp_dev_layout.addWidget(QLabel("设备列表:"), 0, 0)
+        grp_dev_layout.addWidget(self._cmb_devices, 0, 1)
+        self._btn_enumerate = QPushButton("枚举设备")
+        self._btn_enumerate.clicked.connect(self._on_enumerate)
+        grp_dev_layout.addWidget(self._btn_enumerate, 0, 2)
+        layout.addWidget(grp_dev)
 
-    def _capture_worker(self, capture_interval: float) -> None:
-        """自动捕获工作线程（绝对时间基准）。"""
-        self.camera_ready_event.wait()
-        next_save_time = time.time() + capture_interval
-        while not self._stop_capture_event.is_set():
-            if self.capture_flag == 1:
-                current_time = time.time()
-                if current_time >= next_save_time:
-                    filename = str(self.save_counter) + ".bmp"
-                    if self.camera_driver:
-                        self.camera_driver.save_bmp(filename=filename)
-                    self.save_counter += 1
-                    next_save_time += capture_interval
-                    if time.time() > next_save_time:
-                        next_save_time = time.time() + capture_interval
-                else:
-                    time.sleep(0.01)
-            else:
-                time.sleep(0.05)
+        # --- 相机控制按钮 ---
+        grp_ctrl = QGroupBox("相机控制")
+        grp_ctrl_layout = QHBoxLayout(grp_ctrl)
+        self._btn_open = QPushButton("打开")
+        self._btn_open.clicked.connect(self._on_open)
+        self._btn_open.setEnabled(False)
+        grp_ctrl_layout.addWidget(self._btn_open)
+        self._btn_close = QPushButton("关闭")
+        self._btn_close.clicked.connect(self._on_close)
+        self._btn_close.setEnabled(False)
+        grp_ctrl_layout.addWidget(self._btn_close)
+        self._btn_start_grab = QPushButton("开始取流")
+        self._btn_start_grab.clicked.connect(self._on_start_grab)
+        self._btn_start_grab.setEnabled(False)
+        grp_ctrl_layout.addWidget(self._btn_start_grab)
+        self._btn_stop_grab = QPushButton("停止取流")
+        self._btn_stop_grab.clicked.connect(self._on_stop_grab)
+        self._btn_stop_grab.setEnabled(False)
+        grp_ctrl_layout.addWidget(self._btn_stop_grab)
+        layout.addWidget(grp_ctrl)
+
+        # --- 参数设置 ---
+        grp_param = QGroupBox("相机参数")
+        grp_param_layout = QGridLayout(grp_param)
+        config = self.load_config()
+
+        grp_param_layout.addWidget(QLabel("帧率 (FPS):"), 0, 0)
+        self._spn_framerate = QDoubleSpinBox()
+        self._spn_framerate.setRange(1.0, 200.0)
+        self._spn_framerate.setValue(config.get("framerate", 90.0))
+        grp_param_layout.addWidget(self._spn_framerate, 0, 1)
+
+        grp_param_layout.addWidget(QLabel("曝光时间 (us):"), 0, 2)
+        self._spn_exposure = QDoubleSpinBox()
+        self._spn_exposure.setRange(10.0, 1000000.0)
+        self._spn_exposure.setDecimals(0)
+        self._spn_exposure.setValue(config.get("exposuretime", 10000.0))
+        grp_param_layout.addWidget(self._spn_exposure, 0, 3)
+
+        grp_param_layout.addWidget(QLabel("增益:"), 1, 0)
+        self._spn_gain = QDoubleSpinBox()
+        self._spn_gain.setRange(0.0, 100.0)
+        self._spn_gain.setValue(config.get("gain", 0.0))
+        grp_param_layout.addWidget(self._spn_gain, 1, 1)
+
+        btn_apply = QPushButton("应用参数")
+        btn_apply.clicked.connect(self._on_apply_params)
+        grp_param_layout.addWidget(btn_apply, 1, 3)
+        btn_save = QPushButton("保存配置")
+        btn_save.clicked.connect(self._on_save_config)
+        grp_param_layout.addWidget(btn_save, 1, 4)
+        layout.addWidget(grp_param)
+
+        # --- 实验控制 ---
+        grp_exp = QGroupBox("实验控制")
+        grp_exp_layout = QHBoxLayout(grp_exp)
+        self._btn_experiment = QPushButton("▶ 启动实验")
+        self._btn_experiment.setMinimumHeight(40)
+        self._btn_experiment.setStyleSheet(
+            "QPushButton { background: #28a745; color: white; font-size: 14px; "
+            "font-weight: bold; border-radius: 4px; }"
+            "QPushButton:disabled { background: #666; color: #999; }"
+            "QPushButton:hover { background: #218838; }"
+        )
+        self._btn_experiment.clicked.connect(self._on_start_experiment)
+        self._btn_experiment.setEnabled(False)
+        grp_exp_layout.addWidget(self._btn_experiment)
+        layout.addWidget(grp_exp)
+
+        # --- 日志 ---
+        grp_log = QGroupBox("日志")
+        grp_log_layout = QVBoxLayout(grp_log)
+        self._txt_log = QTextEdit()
+        self._txt_log.setReadOnly(True)
+        self._txt_log.setMaximumHeight(150)
+        self._txt_log.setStyleSheet(
+            "QTextEdit { background: #1e1e1e; color: #ddd; font-family: Consolas; "
+            "font-size: 11px; }"
+        )
+        grp_log_layout.addWidget(self._txt_log)
+        layout.addWidget(grp_log)
+
+        # --- 信号连接 ---
+        self.signals.log_message.connect(self._append_log)
+
+        # --- 初始化 SDK ---
+        try:
+            self.init_sdk()
+        except Exception as e:
+            self._log(f"SDK 初始化失败: {e}")
+
+        # --- 显示 ---
+        self.main_window.show()
+        self._log("GUI 已启动 — 请枚举设备并打开相机")
+
+        # 窗口关闭时清理
+        self.main_window.destroyed.connect(self._on_window_closed)
+
+        # 阻塞直到窗口关闭
+        self.app.exec_()
+
+    # ================================================================
+    # UI 事件处理
+    # ================================================================
+
+    def _on_enumerate(self) -> None:
+        """点击「枚举设备」。"""
+        try:
+            device_list = self.enumerate_devices()
+            self._cmb_devices.clear()
+            n = device_list.nDeviceNum
+            if n == 0:
+                self._cmb_devices.addItem("(无设备)")
+                self._log("未找到相机设备")
+                self._update_buttons(has_device=False)
+                return
+            # Hikvision SDK 设备名在设备信息结构中
+            for i in range(n):
+                self._cmb_devices.addItem(f"相机 {i}")
+            self._cmb_devices.setCurrentIndex(0)
+            self._log(f"找到 {n} 个设备")
+            self._update_buttons(has_device=True)
+        except Exception as e:
+            self._log(f"枚举失败: {e}")
+
+    def _on_open(self) -> None:
+        """点击「打开」。"""
+        idx = self._cmb_devices.currentIndex()
+        self.open_device(idx)
+        self._update_buttons()
+
+    def _on_close(self) -> None:
+        """点击「关闭」。"""
+        self.close_device()
+        self._update_buttons()
+
+    def _on_start_grab(self) -> None:
+        """点击「开始取流」。"""
+        self.start_grabbing()
+        self._update_buttons()
+
+    def _on_stop_grab(self) -> None:
+        """点击「停止取流」。"""
+        self.stop_grabbing()
+        self._update_buttons()
+
+    def _on_apply_params(self) -> None:
+        """点击「应用参数」。"""
+        framerate = self._spn_framerate.value()
+        exposure = self._spn_exposure.value()
+        gain = self._spn_gain.value()
+        self.set_parameters(framerate, exposure, gain)
+
+    def _on_save_config(self) -> None:
+        """点击「保存配置」。"""
+        self.save_config(
+            self._spn_framerate.value(),
+            self._spn_exposure.value(),
+            self._spn_gain.value(),
+        )
+
+    def _on_start_experiment(self) -> None:
+        """点击「启动实验」。"""
+        if not self.is_grabbing:
+            self._log("警告: 请先开始取流再启动实验")
+            return
+        self._btn_experiment.setEnabled(False)
+        self._btn_experiment.setText("实验运行中...")
+        self._log("=" * 60)
+        self._log("实验启动!")
+        self._log("=" * 60)
+
+        if self._experiment_callback:
+            # 在后台线程运行实验，避免阻塞 UI
+            threading.Thread(
+                target=self._experiment_callback,
+                args=(self.camera_driver,),
+                daemon=True,
+            ).start()
+        else:
+            self._log("警告: 未设置实验回调函数")
+
+    def _on_window_closed(self) -> None:
+        """窗口关闭时的清理。"""
+        self._log("窗口关闭，清理资源...")
+        self.close_device()
+        try:
+            self.finalize_sdk()
+        except Exception:
+            pass
+
+    # ================================================================
+    # 辅助
+    # ================================================================
+
+    def _update_buttons(self, has_device: Optional[bool] = None) -> None:
+        """根据相机状态更新按钮启用/禁用。"""
+        if has_device is not None:
+            has_dev = has_device
+        else:
+            has_dev = self.device_list is not None and self.device_list.nDeviceNum > 0
+
+        self._btn_open.setEnabled(has_dev and not self.is_open)
+        self._btn_close.setEnabled(self.is_open)
+        self._btn_start_grab.setEnabled(self.is_open and not self.is_grabbing)
+        self._btn_stop_grab.setEnabled(self.is_grabbing)
+        self._btn_experiment.setEnabled(self.is_grabbing)
+
+        if self.is_grabbing:
+            self._lbl_status.setText("● 取流中 — 可以启动实验")
+            self._lbl_status.setStyleSheet(
+                "QLabel { background: #1a3a1a; color: #0f0; padding: 6px; "
+                "font-family: Consolas; font-size: 13px; }"
+            )
+        elif self.is_open:
+            self._lbl_status.setText("设备已打开 — 请开始取流")
+            self._lbl_status.setStyleSheet(
+                "QLabel { background: #333; color: #ff0; padding: 6px; "
+                "font-family: Consolas; font-size: 13px; }"
+            )
+        elif has_dev:
+            self._lbl_status.setText("设备就绪 — 请打开设备")
+            self._lbl_status.setStyleSheet(
+                "QLabel { background: #333; color: #0f0; padding: 6px; "
+                "font-family: Consolas; font-size: 13px; }"
+            )
+        else:
+            self._lbl_status.setText("就绪 — 请先枚举设备")
+            self._lbl_status.setStyleSheet(
+                "QLabel { background: #333; color: #0f0; padding: 6px; "
+                "font-family: Consolas; font-size: 13px; }"
+            )
+
+    def _log(self, message: str) -> None:
+        """记录日志（线程安全）。"""
+        if self._txt_log:
+            # 从任意线程安全地追加日志
+            self.signals.log_message.emit(message)
+        else:
+            print(f"[UI] {message}")
+
+    def _append_log(self, message: str) -> None:
+        """实际追加日志到 QTextEdit（必须在主线程调用）。"""
+        if self._txt_log:
+            timestamp = time.strftime("%H:%M:%S")
+            self._txt_log.append(f"[{timestamp}] {message}")
