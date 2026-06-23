@@ -36,8 +36,9 @@ except ImportError:
 
 class _ExperimentSignals(QObject):
     """用于 UI 线程与实验线程通信的信号。"""
-    experiment_requested = pyqtSignal()   # 用户点击"启动实验"
-    log_message = pyqtSignal(str)          # 日志消息 → UI
+    experiment_requested = pyqtSignal()    # 用户点击"启动实验"
+    experiment_finished = pyqtSignal()     # 实验线程结束（自然完成或异常退出）
+    log_message = pyqtSignal(str)           # 日志消息 → UI
 
 
 # ================================================================
@@ -83,6 +84,7 @@ class CameraControlWindow:
 
         # === 实验回调 ===
         self._experiment_callback = None
+        self._active_experiment = None  # 正在运行的实验实例引用
 
         # === 延迟导入 ===
         from src.stage2_experiment.hardware.camera import CameraDriver
@@ -92,6 +94,7 @@ class CameraControlWindow:
             MV_GENTL_CAMERALINK_DEVICE, MV_GENTL_CXP_DEVICE,
             MV_GENTL_XOF_DEVICE,
         )
+        self._CameraDriver = CameraDriver
         self._MvCamera = MvCamera
         self._MV_CC_DEVICE_INFO_LIST = MV_CC_DEVICE_INFO_LIST
         self._MV_GIGE_DEVICE = MV_GIGE_DEVICE
@@ -112,6 +115,8 @@ class CameraControlWindow:
         self._btn_start_grab: Optional[QPushButton] = None
         self._btn_stop_grab: Optional[QPushButton] = None
         self._btn_experiment: Optional[QPushButton] = None
+        self._btn_stop_experiment: Optional[QPushButton] = None
+        self._frame_display: Optional[QWidget] = None
         self._spn_framerate: Optional[QDoubleSpinBox] = None
         self._spn_exposure: Optional[QDoubleSpinBox] = None
         self._spn_gain: Optional[QDoubleSpinBox] = None
@@ -171,7 +176,7 @@ class CameraControlWindow:
         """打开指定索引的相机设备。"""
         if self.cam is None:
             self.cam = self._MvCamera()
-        self.camera_driver = CameraDriver(self.cam, self.device_list, index)
+        self.camera_driver = self._CameraDriver(self.cam, self.device_list, index)
         ret = self.camera_driver.open_device()
         if ret == 0:
             self.is_open = True
@@ -190,12 +195,12 @@ class CameraControlWindow:
         self.camera_ready_event.clear()
         self._log("设备已关闭")
 
-    def start_grabbing(self) -> bool:
-        """开始连续取流。"""
+    def start_grabbing(self, display_handle: int = 0) -> bool:
+        """开始连续取流。display_handle 为预览窗口 HWND（0 表示不显示）。"""
         if not self.camera_driver or not self.is_open:
             self._log("错误: 请先打开设备")
             return False
-        ret = self.camera_driver.start_grabbing(0)
+        ret = self.camera_driver.start_grabbing(display_handle)
         if ret == 0:
             self.is_grabbing = True
             self.camera_ready_event.set()
@@ -265,9 +270,32 @@ class CameraControlWindow:
         设置实验启动回调。当用户点击"启动实验"时调用。
 
         Args:
-            callback: 可调用对象，签名为 callback(camera_driver)。
+            callback: 可调用对象，签名为 callback(camera_driver, ui)。
         """
         self._experiment_callback = callback
+
+    def set_experiment(self, experiment) -> None:
+        """
+        设置/清除当前活动实验的引用（由 pipeline 回调调用）。
+
+        可从任意线程调用（PyQt5 信号是线程安全的）。
+
+        Args:
+            experiment: Experiment 实例或 None。
+        """
+        self._active_experiment = experiment
+        if experiment is None:
+            # 实验已完成，通知 UI 线程更新按钮状态
+            self.signals.experiment_finished.emit()
+
+    def _get_display_handle(self) -> int:
+        """获取相机预览窗口的原生 HWND（Windows）。"""
+        if self._frame_display is not None:
+            try:
+                return int(self._frame_display.winId())
+            except Exception:
+                return 0
+        return 0
 
     # ================================================================
     # GUI 构建
@@ -284,35 +312,195 @@ class CameraControlWindow:
 
         self.app = QApplication.instance() or QApplication(sys.argv)
 
+        # --- 强制使用 Fusion 样式（跨平台一致） ---
+        self.app.setStyle("Fusion")
+
+        # --- 全局样式表：确保所有控件清晰可见 ---
+        # 关键：Fusion 的 QPalette.Button 和 QPalette.Window 颜色相同，
+        # 导致按钮无边框时完全不可见。因此必须用 stylesheet 显式定义。
+        self.app.setStyleSheet("""
+            /* 主窗口背景 */
+            QMainWindow {
+                background: #f0f0f5;
+            }
+
+            /* 分组框：可见边框 + 深色标题 */
+            QGroupBox {
+                border: 1px solid #b0b0b0;
+                border-radius: 4px;
+                margin-top: 10px;
+                padding-top: 14px;
+                font-weight: bold;
+                font-size: 13px;
+                color: #222;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 6px;
+                color: #222;
+            }
+
+            /* 按钮：青灰色背景 + 可见边框 */
+            QPushButton {
+                background: #dce4ec;
+                border: 1px solid #8899aa;
+                border-radius: 3px;
+                padding: 4px 10px;
+                color: #111;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background: #c4d4e4;
+                border: 1px solid #667788;
+            }
+            QPushButton:pressed {
+                background: #b0c4d8;
+            }
+            QPushButton:disabled {
+                background: #e8e8e8;
+                color: #999;
+                border: 1px solid #ccc;
+            }
+
+            /* 下拉框：白底 + 可见边框 */
+            QComboBox {
+                background: #ffffff;
+                border: 1px solid #8899aa;
+                border-radius: 3px;
+                padding: 3px 8px;
+                color: #111;
+                font-size: 12px;
+            }
+            QComboBox:hover {
+                border: 1px solid #556677;
+            }
+            QComboBox:disabled {
+                background: #f0f0f0;
+                color: #999;
+                border: 1px solid #ccc;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 20px;
+                border-left: 1px solid #b0b0b0;
+            }
+            QComboBox QAbstractItemView {
+                background: #ffffff;
+                border: 1px solid #8899aa;
+                color: #111;
+                selection-background-color: #0078d7;
+                selection-color: #ffffff;
+            }
+
+            /* 数字输入框：白底 + 可见边框 */
+            QDoubleSpinBox {
+                background: #ffffff;
+                border: 1px solid #8899aa;
+                border-radius: 3px;
+                padding: 3px 6px;
+                color: #111;
+                font-size: 12px;
+            }
+            QDoubleSpinBox:hover {
+                border: 1px solid #556677;
+            }
+            QDoubleSpinBox:disabled {
+                background: #f0f0f0;
+                color: #999;
+                border: 1px solid #ccc;
+            }
+
+            /* 标签：深色文字 */
+            QLabel {
+                color: #222;
+                font-size: 12px;
+            }
+
+            /* 只读文本框 */
+            QTextEdit[readOnly="true"] {
+                background: #f8f8f8;
+                color: #333;
+                border: 1px solid #bbb;
+            }
+        """)
+
         # --- 主窗口 ---
         self.main_window = QMainWindow()
         self.main_window.setWindowTitle("海康相机控制 — SwarmReservoir Stage 2")
-        self.main_window.setMinimumSize(640, 520)
+        self.main_window.setMinimumSize(900, 650)
 
         central = QWidget()
+        central.setStyleSheet("background: #f0f0f5;")
         self.main_window.setCentralWidget(central)
-        layout = QVBoxLayout(central)
-        layout.setSpacing(8)
+        # 主布局：水平分割 — 左侧预览，右侧控制面板
+        main_layout = QHBoxLayout(central)
+        main_layout.setSpacing(8)
+
+        # === 左侧：相机预览 ===
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(4)
 
         # --- 状态栏 ---
         self._lbl_status = QLabel("就绪 — 请先枚举设备")
         self._lbl_status.setStyleSheet(
-            "QLabel { background: #333; color: #0f0; padding: 6px; "
-            "font-family: Consolas; font-size: 13px; }"
+            "QLabel { background: #e8e8e8; color: #1a7a1a; padding: 6px; "
+            "font-family: Consolas; font-size: 13px; font-weight: bold; }"
         )
-        layout.addWidget(self._lbl_status)
+        left_layout.addWidget(self._lbl_status)
+
+        # --- 相机预览显示区域 ---
+        #  相机 SDK 通过 MV_CC_DisplayOneFrame 直接绘制到 widget 的
+        #  原生窗口 HDC。给该 widget 设置任何 stylesheet 都会导致 Qt
+        #  接管 paintEvent 并用默认背景色覆盖相机画面 → 灰色无图像。
+        #  因此：内层 QWidget 完全不设置 stylesheet，边框由外层 QFrame 提供。
+
+        # 外层 QFrame 提供可见边框
+        frame_wrapper = QFrame()
+        frame_wrapper.setFrameStyle(QFrame.Box)
+        frame_wrapper.setStyleSheet(
+            "QFrame { border: 1px solid #aaa; background: transparent; }"
+        )
+        frame_wrapper_layout = QVBoxLayout(frame_wrapper)
+        frame_wrapper_layout.setContentsMargins(0, 0, 0, 0)
+
+        # 内层 QWidget：供相机 SDK 渲染，不设任何 stylesheet
+        self._frame_display = QWidget()
+        self._frame_display.setMinimumSize(640, 480)
+        # 确保有稳定的原生窗口句柄供相机 SDK 渲染
+        self._frame_display.setAttribute(Qt.WA_NativeWindow, True)
+        self._frame_display.setAttribute(Qt.WA_PaintOnScreen, True)
+        self._frame_display.setAutoFillBackground(False)
+        frame_wrapper_layout.addWidget(self._frame_display)
+
+        left_layout.addWidget(frame_wrapper, 1)  # stretch=1 填充剩余空间
+
+        main_layout.addWidget(left_widget, 3)  # stretch=3
+
+        # === 右侧：控制面板 ===
+        right_widget = QWidget()
+        right_widget.setMinimumWidth(280)
+        right_layout = QVBoxLayout(right_widget)
+        main_layout.addWidget(right_widget, 1)  # stretch=1 添加右侧面板到主布局
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
 
         # --- 设备选择 ---
         grp_dev = QGroupBox("设备选择")
-        grp_dev_layout = QGridLayout(grp_dev)
+        grp_dev_layout = QVBoxLayout(grp_dev)
+        hbox_dev = QHBoxLayout()
         self._cmb_devices = QComboBox()
-        self._cmb_devices.setMinimumWidth(350)
-        grp_dev_layout.addWidget(QLabel("设备列表:"), 0, 0)
-        grp_dev_layout.addWidget(self._cmb_devices, 0, 1)
+        self._cmb_devices.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        hbox_dev.addWidget(QLabel("设备:"))
+        hbox_dev.addWidget(self._cmb_devices, 1)
         self._btn_enumerate = QPushButton("枚举设备")
         self._btn_enumerate.clicked.connect(self._on_enumerate)
-        grp_dev_layout.addWidget(self._btn_enumerate, 0, 2)
-        layout.addWidget(grp_dev)
+        hbox_dev.addWidget(self._btn_enumerate)
+        grp_dev_layout.addLayout(hbox_dev)
+        right_layout.addWidget(grp_dev)
 
         # --- 相机控制按钮 ---
         grp_ctrl = QGroupBox("相机控制")
@@ -333,7 +521,7 @@ class CameraControlWindow:
         self._btn_stop_grab.clicked.connect(self._on_stop_grab)
         self._btn_stop_grab.setEnabled(False)
         grp_ctrl_layout.addWidget(self._btn_stop_grab)
-        layout.addWidget(grp_ctrl)
+        right_layout.addWidget(grp_ctrl)
 
         # --- 参数设置 ---
         grp_param = QGroupBox("相机参数")
@@ -346,26 +534,27 @@ class CameraControlWindow:
         self._spn_framerate.setValue(config.get("framerate", 90.0))
         grp_param_layout.addWidget(self._spn_framerate, 0, 1)
 
-        grp_param_layout.addWidget(QLabel("曝光时间 (us):"), 0, 2)
+        grp_param_layout.addWidget(QLabel("曝光 (us):"), 0, 2)
         self._spn_exposure = QDoubleSpinBox()
         self._spn_exposure.setRange(10.0, 1000000.0)
         self._spn_exposure.setDecimals(0)
         self._spn_exposure.setValue(config.get("exposuretime", 10000.0))
         grp_param_layout.addWidget(self._spn_exposure, 0, 3)
 
-        grp_param_layout.addWidget(QLabel("增益:"), 1, 0)
+        grp_param_layout.addWidget(QLabel("增益 (dB):"), 1, 0)
         self._spn_gain = QDoubleSpinBox()
         self._spn_gain.setRange(0.0, 100.0)
         self._spn_gain.setValue(config.get("gain", 0.0))
         grp_param_layout.addWidget(self._spn_gain, 1, 1)
 
-        btn_apply = QPushButton("应用参数")
+        grp_param_layout.addWidget(QLabel(""), 1, 2)
+        btn_apply = QPushButton("应用")
         btn_apply.clicked.connect(self._on_apply_params)
         grp_param_layout.addWidget(btn_apply, 1, 3)
-        btn_save = QPushButton("保存配置")
+        btn_save = QPushButton("保存")
         btn_save.clicked.connect(self._on_save_config)
         grp_param_layout.addWidget(btn_save, 1, 4)
-        layout.addWidget(grp_param)
+        right_layout.addWidget(grp_param)
 
         # --- 实验控制 ---
         grp_exp = QGroupBox("实验控制")
@@ -380,24 +569,36 @@ class CameraControlWindow:
         )
         self._btn_experiment.clicked.connect(self._on_start_experiment)
         self._btn_experiment.setEnabled(False)
-        grp_exp_layout.addWidget(self._btn_experiment)
-        layout.addWidget(grp_exp)
+        grp_exp_layout.addWidget(self._btn_experiment, 1)
+        self._btn_stop_experiment = QPushButton("■ 停止")
+        self._btn_stop_experiment.setMinimumHeight(40)
+        self._btn_stop_experiment.setStyleSheet(
+            "QPushButton { background: #dc3545; color: white; font-size: 14px; "
+            "font-weight: bold; border-radius: 4px; }"
+            "QPushButton:disabled { background: #666; color: #999; }"
+            "QPushButton:hover { background: #c82333; }"
+        )
+        self._btn_stop_experiment.clicked.connect(self._on_stop_experiment)
+        self._btn_stop_experiment.setEnabled(False)
+        grp_exp_layout.addWidget(self._btn_stop_experiment, 1)
+        right_layout.addWidget(grp_exp)
 
         # --- 日志 ---
         grp_log = QGroupBox("日志")
         grp_log_layout = QVBoxLayout(grp_log)
         self._txt_log = QTextEdit()
         self._txt_log.setReadOnly(True)
-        self._txt_log.setMaximumHeight(150)
+        self._txt_log.setMaximumHeight(120)
         self._txt_log.setStyleSheet(
-            "QTextEdit { background: #1e1e1e; color: #ddd; font-family: Consolas; "
-            "font-size: 11px; }"
+            "QTextEdit { background: #f5f5f5; color: #333; font-family: Consolas; "
+            "font-size: 11px; border: 1px solid #ccc; }"
         )
         grp_log_layout.addWidget(self._txt_log)
-        layout.addWidget(grp_log)
+        right_layout.addWidget(grp_log)
 
         # --- 信号连接 ---
         self.signals.log_message.connect(self._append_log)
+        self.signals.experiment_finished.connect(self._on_experiment_finished)
 
         # --- 初始化 SDK ---
         try:
@@ -447,16 +648,19 @@ class CameraControlWindow:
 
     def _on_close(self) -> None:
         """点击「关闭」。"""
+        self._stop_experiment_if_running()
         self.close_device()
         self._update_buttons()
 
     def _on_start_grab(self) -> None:
         """点击「开始取流」。"""
-        self.start_grabbing()
+        display_hwnd = self._get_display_handle()
+        self.start_grabbing(display_handle=display_hwnd)
         self._update_buttons()
 
     def _on_stop_grab(self) -> None:
         """点击「停止取流」。"""
+        self._stop_experiment_if_running()
         self.stop_grabbing()
         self._update_buttons()
 
@@ -482,23 +686,50 @@ class CameraControlWindow:
             return
         self._btn_experiment.setEnabled(False)
         self._btn_experiment.setText("实验运行中...")
+        self._btn_stop_experiment.setEnabled(True)
         self._log("=" * 60)
         self._log("实验启动!")
         self._log("=" * 60)
 
         if self._experiment_callback:
             # 在后台线程运行实验，避免阻塞 UI
+            # 传递 self 以便回调可以设置实验引用
             threading.Thread(
                 target=self._experiment_callback,
-                args=(self.camera_driver,),
+                args=(self.camera_driver, self),
                 daemon=True,
             ).start()
         else:
             self._log("警告: 未设置实验回调函数")
 
+    def _on_stop_experiment(self) -> None:
+        """点击「停止实验」（只停止实验，不停相机）。"""
+        self._stop_experiment_if_running()
+        self._update_buttons()
+
+    def _on_experiment_finished(self) -> None:
+        """实验自然完成或异常退出时（由信号触发，确保主线程更新 UI）。"""
+        self._log("实验已结束")
+        self._btn_experiment.setText("▶ 启动实验")
+        self._btn_experiment.setEnabled(self.is_grabbing)
+        self._btn_stop_experiment.setEnabled(False)
+
+    def _stop_experiment_if_running(self) -> None:
+        """安全地停止正在运行的实验。"""
+        if self._active_experiment is not None:
+            self._log("正在停止实验...")
+            try:
+                self._active_experiment.stop()
+            except Exception as e:
+                self._log(f"停止实验时出错: {e}")
+            self._active_experiment = None
+            self._btn_experiment.setText("▶ 启动实验")
+            self._btn_stop_experiment.setEnabled(False)
+
     def _on_window_closed(self) -> None:
         """窗口关闭时的清理。"""
         self._log("窗口关闭，清理资源...")
+        self._stop_experiment_if_running()
         self.close_device()
         try:
             self.finalize_sdk()
@@ -520,31 +751,36 @@ class CameraControlWindow:
         self._btn_close.setEnabled(self.is_open)
         self._btn_start_grab.setEnabled(self.is_open and not self.is_grabbing)
         self._btn_stop_grab.setEnabled(self.is_grabbing)
-        self._btn_experiment.setEnabled(self.is_grabbing)
+        # 实验按钮：采集中 && 实验未在运行
+        exp_running = self._active_experiment is not None
+        self._btn_experiment.setEnabled(self.is_grabbing and not exp_running)
+        if not exp_running and self._btn_experiment.text() != "▶ 启动实验":
+            self._btn_experiment.setText("▶ 启动实验")
+        self._btn_stop_experiment.setEnabled(exp_running)
 
         if self.is_grabbing:
             self._lbl_status.setText("● 取流中 — 可以启动实验")
             self._lbl_status.setStyleSheet(
-                "QLabel { background: #1a3a1a; color: #0f0; padding: 6px; "
-                "font-family: Consolas; font-size: 13px; }"
+                "QLabel { background: #d4edda; color: #155724; padding: 6px; "
+                "font-family: Consolas; font-size: 13px; font-weight: bold; }"
             )
         elif self.is_open:
             self._lbl_status.setText("设备已打开 — 请开始取流")
             self._lbl_status.setStyleSheet(
-                "QLabel { background: #333; color: #ff0; padding: 6px; "
-                "font-family: Consolas; font-size: 13px; }"
+                "QLabel { background: #fff3cd; color: #856404; padding: 6px; "
+                "font-family: Consolas; font-size: 13px; font-weight: bold; }"
             )
         elif has_dev:
             self._lbl_status.setText("设备就绪 — 请打开设备")
             self._lbl_status.setStyleSheet(
-                "QLabel { background: #333; color: #0f0; padding: 6px; "
-                "font-family: Consolas; font-size: 13px; }"
+                "QLabel { background: #e8e8e8; color: #1a7a1a; padding: 6px; "
+                "font-family: Consolas; font-size: 13px; font-weight: bold; }"
             )
         else:
             self._lbl_status.setText("就绪 — 请先枚举设备")
             self._lbl_status.setStyleSheet(
-                "QLabel { background: #333; color: #0f0; padding: 6px; "
-                "font-family: Consolas; font-size: 13px; }"
+                "QLabel { background: #e8e8e8; color: #1a7a1a; padding: 6px; "
+                "font-family: Consolas; font-size: 13px; font-weight: bold; }"
             )
 
     def _log(self, message: str) -> None:

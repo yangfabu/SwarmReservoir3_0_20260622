@@ -78,8 +78,9 @@ def run_stage2(
     # 3. 初始化相机
     camera_driver = None
     try:
+        from src.stage2_experiment.ui import CameraControlWindow
+
         if headless:
-            from src.stage2_experiment.ui import CameraControlWindow
             ui = CameraControlWindow(Path(__file__).resolve().parent.parent.parent / "config")
             if not ui.auto_open_and_grab():
                 logger.error("相机初始化失败（headless 模式）")
@@ -96,7 +97,7 @@ def run_stage2(
             ui = CameraControlWindow(Path(__file__).resolve().parent.parent.parent / "config")
 
             # 定义实验启动回调：用户在 UI 中点击"启动实验"时触发
-            def _start_experiment_from_ui(camera_drv):
+            def _start_experiment_from_ui(camera_drv, ui):
                 logger.info("用户通过 UI 启动了实验")
                 exp_name = exp_cfg.get("name", "MCTest")
                 output_dir = resolve_path(f"data/stage2_output/{exp_name}")
@@ -110,6 +111,9 @@ def run_stage2(
                     frame_interval_ms=exp_cfg.get("frame_interval_ms", 16.67),
                 )
 
+                # 将实验引用注册到 UI，以便 UI 可以停止实验
+                ui.set_experiment(experiment)
+
                 try:
                     logger.info(f"实验开始: {exp_name}")
                     experiment.start(blocking=True)
@@ -119,6 +123,9 @@ def run_stage2(
                     experiment.stop()
                 except Exception as e:
                     logger.error(f"实验异常: {e}")
+                finally:
+                    # 实验结束后清除引用
+                    ui.set_experiment(None)
 
             ui.set_experiment_callback(_start_experiment_from_ui)
 
